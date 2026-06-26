@@ -22,7 +22,7 @@ load_dotenv()
 
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
-PINECONE_ENVIRONMENT = os.getenv("PINECONE_ENVIRONMENT", "us-east-1")
+PINECONE_ENV = os.getenv("PINECONE_ENV", "us-east-1")
 PINECONE_INDEX_NAME = os.getenv("PINECONE_INDEX_NAME", "medicaldiagnosis")
 UPLOAD_DIR = os.getenv("UPLOAD_DIR", "./uploaded_reports")
 
@@ -47,7 +47,7 @@ if PINECONE_INDEX_NAME not in existing_indexes:
         metric="dotproduct",
         spec=ServerlessSpec(
             cloud="aws",
-            region=PINECONE_ENVIRONMENT,
+            region=PINECONE_ENV,
         ),
     )
 
@@ -62,7 +62,6 @@ index = pc.Index(PINECONE_INDEX_NAME)
 embed_model = GoogleGenerativeAIEmbeddings(
     model="models/gemini-embedding-001"
 )
-
 # -----------------------------
 # Upload + Embed
 # -----------------------------
@@ -72,29 +71,49 @@ async def load_vectorstore(
     doc_id: str,
 ):
 
+    print("=" * 80)
+    print("VECTORSTORE DOC_ID :", doc_id)
+    print("UPLOADER :", uploaded)
+    print("=" * 80)
+
     for file in uploaded_files:
 
         filename = Path(file.filename).name
         save_path = Path(UPLOAD_DIR) / f"{doc_id}_{filename}"
 
+        # Save uploaded PDF
         content = await file.read()
 
         with open(save_path, "wb") as f:
             f.write(content)
 
+        # Load PDF
         loader = PyPDFLoader(str(save_path))
         documents = loader.load()
 
+        # Better chunking for medical reports
         splitter = RecursiveCharacterTextSplitter(
-            chunk_size=500,
-            chunk_overlap=100,
+            chunk_size=1000,
+            chunk_overlap=200,
+            separators=[
+                "\n\n",
+                "\n",
+                ". ",
+                " ",
+                ""
+            ],
         )
 
         chunks = splitter.split_documents(documents)
 
+        print(f"Total chunks created: {len(chunks)}")
+
         texts = [chunk.page_content for chunk in chunks]
 
-        ids = [f"{doc_id}-{i}" for i in range(len(chunks))]
+        ids = [
+            f"{doc_id}-{i}"
+            for i in range(len(chunks))
+        ]
 
         metadatas = [
             {
@@ -113,6 +132,12 @@ async def load_vectorstore(
             embed_model.embed_documents,
             texts,
         )
+        print("=" * 80)
+        print("UPSERT DOC_ID :", doc_id)
+        print("VECTOR IDS :", ids)
+        print("FIRST METADATA :", metadatas[0])
+        print("Embedding Dimension :", len(embeddings[0]))
+        print("=" * 80)
 
         print("Uploading vectors to Pinecone...")
 
@@ -120,6 +145,18 @@ async def load_vectorstore(
             index.upsert,
             vectors=list(zip(ids, embeddings, metadatas)),
         )
+
+        print("Checking upload...")
+
+        fetch_result = await asyncio.to_thread(
+            index.fetch,
+            ids=[ids[0]]
+        )
+
+        print("=" * 80)
+        print("FETCH RESULT")
+        print(fetch_result)
+        print("=" * 80)
 
         print("Vectors uploaded successfully.")
 
